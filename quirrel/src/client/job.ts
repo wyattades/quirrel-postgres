@@ -1,8 +1,10 @@
+export type JobId = string | number;
+
 export interface JobDTO {
   /**
    * ID, used in conjunction with `endpoint` to identify the job.
    */
-  readonly id: string;
+  readonly id: JobId;
 
   /**
    * Endpoint the job will be executed against.
@@ -19,27 +21,27 @@ export interface JobDTO {
    * Date that the job has been scheduled for.
    * @implements ISO-8601
    */
-  readonly runAt: string;
+  readonly runAt?: string;
 
   /**
    * Guarantees that no other job (from the same queue)
    * is executed while this job is being executed.
    */
-  readonly exclusive: boolean;
+  readonly exclusive?: boolean;
 
   /**
    * If a job fails, retry it at along the specified intervals.
    * @example [10, 20, 30] // retries it after 10ms, 20ms and 30ms.
    * @example [] // doesn't retry.
    */
-  readonly retry: number[];
+  readonly retry?: number[];
 
   /**
    * What repetition the next execution will be.
    * Starts at 1, increments with every execution.
    * Used for repeat and retry.
    */
-  readonly count: number;
+  readonly count?: number;
 
   /**
    * Present if the job has been scheduled to repeat.
@@ -60,13 +62,6 @@ export interface JobDTO {
      * @see https://github.com/harrisiirak/cron-parser
      */
     readonly cron?: string;
-
-    /**
-     * What repetition the next execution will be.
-     * Starts at 1, increments with every execution.
-     * @deprecated use top-level count instead.
-     */
-    readonly count: number;
   };
 }
 
@@ -75,7 +70,7 @@ export interface Job<T> extends Omit<JobDTO, "runAt" | "body"> {
    * Date that the job has been scheduled for.
    * If it's a repeated job, this is the date for the next execution.
    */
-  readonly runAt: Date;
+  readonly runAt?: Date;
 
   /**
    * Job payload.

@@ -9,13 +9,7 @@ export interface Logger {
       tokenId: string;
     }
   ): void;
-  jobDeleted(
-    job: {
-      endpoint: string;
-      id: string;
-      tokenId: string;
-    }
-  ): void;
+  jobDeleted(job: { endpoint: string; id: string; tokenId: string }): void;
   /**
    * @returns function to call when execution is done
    */
@@ -45,6 +39,7 @@ export function getLogger(type: LoggerType): Logger | undefined {
     case "none":
       return undefined;
     case "dx":
+      // @ts-ignore
       return new DxLogger();
     case "structured":
       return new StructuredLogger();

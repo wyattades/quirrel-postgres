@@ -1,11 +1,13 @@
-import { cron, QuirrelClient } from "../client/index";
 import { promises as fs } from "fs";
-import type { FastifyInstance } from "fastify";
-import { makeFetchMockConnectedTo } from "./fetch-mock";
+// import type { FastifyInstance } from "fastify";
 import * as chokidar from "chokidar";
+
+import { cron, QuirrelClient } from "../client/index";
+// import { makeFetchMockConnectedTo } from "./fetch-mock";
 import { parseChokidarRulesFromGitignore } from "./parse-gitignore";
 
 function requireFrameworkClientForDevelopmentDefaults(framework: string) {
+  console.log("requireFrameworkClientForDevelopmentDefaults", framework);
   require(`../${framework}`);
 }
 
@@ -47,8 +49,8 @@ export class CronDetector {
   private ready = false;
 
   constructor(
-    private readonly cwd: string,
-    private readonly connectedTo?: FastifyInstance,
+    cwd: string,
+    private readonly databaseUrl?: string,
     private readonly dryRun?: boolean
   ) {
     const rules = parseChokidarRulesFromGitignore(cwd);
@@ -89,9 +91,9 @@ export class CronDetector {
     return new QuirrelClient({
       async handler() {},
       route: job.route,
-      fetch: this.connectedTo
-        ? makeFetchMockConnectedTo(this.connectedTo)
-        : undefined,
+      config: {
+        databaseUrl: this.databaseUrl,
+      },
     });
   }
 
@@ -109,20 +111,28 @@ export class CronDetector {
     delete this.pathToCronJob[filePath];
 
     const client = this.getQuirrelClient(job);
-    await client?.delete("@cron");
+    try {
+      await client?.delete("@cron");
+    } catch (err) {
+      console.error("quirrel delete error:", err);
+    }
   }
 
   private async onJobChanged(job: DetectedCronJob, filePath: string) {
     this.pathToCronJob[filePath] = job;
 
     const client = this.getQuirrelClient(job);
-    await client?.enqueue(null, {
-      id: "@cron",
-      override: true,
-      repeat: {
-        cron: job.schedule,
-      },
-    });
+    try {
+      await client?.enqueue(null, {
+        id: "@cron",
+        override: true,
+        repeat: {
+          cron: job.schedule,
+        },
+      });
+    } catch (err) {
+      console.error("quirrel enqueue error:", err);
+    }
   }
 
   private on(fileChangeType: "changed" | "deleted" | "added") {

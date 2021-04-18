@@ -3,16 +3,15 @@ import {
   DefaultJobOptions,
   QuirrelClient,
   QuirrelJobHandler,
-  EnqueueJobOpts,
   EnqueueJobOptions,
   Job,
+  QuirrelPublishClient,
 } from "./client";
 import bodyParser from "body-parser";
 
-export { DefaultJobOptions, QuirrelJobHandler, EnqueueJobOpts, EnqueueJobOptions, Job };
+export { DefaultJobOptions, QuirrelJobHandler, EnqueueJobOptions, Job };
 
-export type Queue<Payload> = connect.Server &
-  Omit<QuirrelClient<Payload>, "respondTo" | "makeRequest">;
+export type Queue<Payload> = connect.Server & QuirrelPublishClient<Payload>;
 
 declare module "connect" {
   export interface IncomingMessage {

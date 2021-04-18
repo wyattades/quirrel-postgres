@@ -18,6 +18,8 @@ type JobDTO = Omit<Job<any>, "invoke" | "delete" | "runAt"> & {
   runAt: string;
 };
 
+const LOCALHOST_PORT = 5432;
+
 export interface QuirrelInstanceDetails {
   baseUrl: string;
   token?: string;
@@ -299,7 +301,7 @@ async function isHealthy(
 }
 
 async function getAllEndpoints(client: QuirrelClient<any>) {
-  const endpointsRes = await client.makeRequest("/queues");
+  const endpointsRes = await client.getQueuedEndpoints();
 
   return (await endpointsRes.json()) as string[];
 }
@@ -409,7 +411,7 @@ export function QuirrelProvider(props: PropsWithChildren<{}>) {
       intervalId = setInterval(async () => {
         const result = await connect(
           connDetails ?? {
-            baseUrl: "http://localhost:9181",
+            baseUrl: `http://localhost:${LOCALHOST_PORT}`,
           }
         );
 

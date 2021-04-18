@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("QUIRREL_DATABASE_URL")
+}
+
+model job {
+  jobid    BigInt  @id @default(autoincrement())
+  schedule String
+  command  String
+  nodename String  @default("localhost")
+  nodeport Int     @default(dbgenerated("inet_server_port()"))
+  database String  @default(dbgenerated("current_database()"))
+  username String  @default(dbgenerated("CURRENT_USER"))
+  active   Boolean @default(true)
+  jobname  String  @db.VarChar(64) // aka postgres 'name' type
+
+  @@unique([jobname, username], name: "jobname_username_uniq")
+}
+
+model job_run_details {
+  jobid          BigInt?
+  runid          BigInt    @id @default(autoincrement())
+  job_pid        Int?
+  database       String?
+  username       String?
+  command        String?
+  status         String?
+  return_message String?
+  start_time     DateTime? @db.Timestamptz(6)
+  end_time       DateTime? @db.Timestamptz(6)
+}

@@ -116,7 +116,7 @@ You can also specify `{ retry: [ ... ] }` as the third argument to the `Queue` c
 
 ```ts
 async enqueueMany(
-  jobs: { payload: T; options?: EnqueueJobOpts }[]
+  jobs: { payload: T; options?: EnqueueJobOptions }[]
 ): Promise<Job<T>[]>
 ```
 
