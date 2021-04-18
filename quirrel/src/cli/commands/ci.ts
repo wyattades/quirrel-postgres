@@ -2,7 +2,7 @@ import { Command } from "commander";
 import Table from "easy-table";
 import { QuirrelClient } from "../../client";
 import { getApplicationBaseUrl } from "../../client/config";
-import type { JobDTO } from "../../client/job";
+import type { Job, JobDTO } from "../../client/job";
 import { CronDetector, DetectedCronJob } from "../cron-detector";
 import * as z from "zod";
 
@@ -23,32 +23,10 @@ async function getOldJobs() {
     route: "",
   });
 
-  const endpointsResponse = await quirrel.makeRequest("/queues/");
-  const endpointsResult = z
-    .array(z.string())
-    .safeParse(await endpointsResponse.json());
-  const endpoints = endpointsResult.success ? endpointsResult.data : [];
-
-  const jobs: JobDTO[] = [];
-
-  await Promise.all(
-    endpoints.map(async (endpoint) => {
-      const jobRes = await quirrel.makeRequest(
-        `/queues/${encodeURIComponent(endpoint)}/${encodeURIComponent("@cron")}`
-      );
-
-      if (jobRes.status !== 200) {
-        return;
-      }
-
-      jobs.push(await jobRes.json());
-    })
-  );
-
-  return jobs;
+  return quirrel.getAllCronJobs();
 }
 
-function computeObsoleteJobs(oldJobs: JobDTO[], newJobs: DetectedCronJob[]) {
+function computeObsoleteJobs(oldJobs: Job<null>[], newJobs: DetectedCronJob[]) {
   const applicationBaseUrl = getApplicationBaseUrl();
 
   const oldJobsAsDetected = oldJobs.map(
@@ -66,7 +44,7 @@ function computeObsoleteJobs(oldJobs: JobDTO[], newJobs: DetectedCronJob[]) {
 }
 
 async function dealWithObsoleteJobs(
-  oldJobs: JobDTO[],
+  oldJobs: Job<null>[],
   newJobs: DetectedCronJob[],
   dryRun: boolean
 ) {

@@ -1,14 +1,14 @@
 import {
   QuirrelClient,
-  EnqueueJobOpts,
   EnqueueJobOptions,
   Job,
   DefaultJobOptions,
   QuirrelJobHandler,
+  QuirrelPublishClient,
 } from "./client";
 import { registerDevelopmentDefaults } from "./client/config";
 
-export { Job, EnqueueJobOpts, EnqueueJobOptions, DefaultJobOptions, QuirrelJobHandler };
+export { Job, EnqueueJobOptions, DefaultJobOptions, QuirrelJobHandler };
 
 registerDevelopmentDefaults({
   applicationBaseUrl: "http://localhost:8911",
@@ -25,10 +25,7 @@ interface RedwoodResponse {
   headers: Record<string, string>;
 }
 
-export type Queue<Payload> = Omit<
-  QuirrelClient<Payload>,
-  "respondTo" | "makeRequest"
->;
+export type Queue<Payload> = QuirrelPublishClient<Payload>;
 
 export function Queue<Payload>(
   route: string,

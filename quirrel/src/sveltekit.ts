@@ -4,6 +4,7 @@ import {
   Job,
   DefaultJobOptions,
   QuirrelJobHandler,
+  QuirrelPublishClient,
 } from "./client";
 import { registerDevelopmentDefaults } from "./client/config";
 
@@ -24,10 +25,7 @@ interface SvelteResponse {
   headers: Record<string, string>;
 }
 
-export type Queue<Payload> = Omit<
-  QuirrelClient<Payload>,
-  "respondTo" | "makeRequest"
->;
+export type Queue<Payload> = QuirrelPublishClient<Payload>;
 
 export function Queue<Payload>(
   route: string,
@@ -40,7 +38,9 @@ export function Queue<Payload>(
     route,
   });
 
-  async function svelteHandler(request: SvelteRequest): Promise<SvelteResponse> {
+  async function svelteHandler(
+    request: SvelteRequest
+  ): Promise<SvelteResponse> {
     const { body, headers, status } = await quirrel.respondTo(
       request.body,
       request.headers

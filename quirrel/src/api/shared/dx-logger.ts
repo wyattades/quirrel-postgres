@@ -62,6 +62,7 @@ Listening on {yellow ${address}}.`.trim()
     );
   }
 
+  // @ts-ignore
   jobDeleted(
     job: JobDTO & {
       tokenId: string;

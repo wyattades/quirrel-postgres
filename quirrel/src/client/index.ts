@@ -1,12 +1,13 @@
-import { Job, JobDTO } from "./job";
-import * as config from "./config";
 import * as z from "zod";
-import type { IsExact, AssertTrue } from "conditional-type-checks";
 import Encryptor from "secure-e2ee";
 import { verify } from "secure-webhooks";
 import ms from "ms";
 import fetch from "cross-fetch";
 import type { IncomingHttpHeaders } from "http";
+import { PrismaClient, job as DbJob } from "@prisma/client";
+
+import { Job, JobDTO, JobId } from "./job";
+import * as config from "./config";
 import pack from "../../package.json";
 import * as EnhancedJSON from "./enhanced-json";
 import { isValidRegex } from "../shared/is-valid-regex";
@@ -30,11 +31,17 @@ interface CreateQuirrelClientArgs<T> {
   defaultJobOptions?: DefaultJobOptions;
   config?: {
     /**
+     * Recommended way to set this: process.env.QUIRREL_DATABASE_URL
+     */
+    databaseUrl?: string;
+
+    /**
      * Recommended way to set this: process.env.QUIRREL_BASE_URL
      */
     applicationBaseUrl?: string;
 
     /**
+     * @deprecated
      * Overrides URL of the Quirrel Endpoint.
      * @default https://api.quirrel.dev or http://localhost:9181
      * Recommended way to set this: process.env.QUIRREL_URL
@@ -76,9 +83,7 @@ const vercelMs = z
 
 const timeDuration = (fieldName = "duration") =>
   z.union([
-    z
-      .number()
-      .min(1, { message: `${fieldName} must be positive` }),
+    z.number().min(1, { message: `${fieldName} must be positive` }),
     vercelMs,
   ]);
 
@@ -90,7 +95,7 @@ export const cron = z
   );
 
 const EnqueueJobOptionsSchema = z.object({
-  id: z.string().optional(),
+  id: z.string().or(z.number()).optional(),
   exclusive: z.boolean().optional(),
   override: z.boolean().optional(),
   retry: z.array(timeDuration("retry")).min(1).max(10).optional(),
@@ -112,14 +117,32 @@ const EnqueueJobOptionsSchema = z.object({
 
 type EnqueueJobOptionsSchema = z.TypeOf<typeof EnqueueJobOptionsSchema>;
 
-type EnqueueJobOptionssSchemaMatchesDocs = AssertTrue<
-  IsExact<EnqueueJobOptions, EnqueueJobOptionsSchema>
->;
+const httpRequestSQL = (
+  url: string,
+  method = "GET",
+  body = {},
+  headers = {}
+) => {
+  return `http((
+    '${method}',
+    '${url}',
+    ARRAY[${Object.entries(headers)
+      .map((k, v) => `http_header('${k}','${v}')`)
+      .join(",")}],
+    'application/json',
+    '${JSON.stringify(body)}'
+  )::http_request)`;
+};
 
-/**
- * @deprecated renamed to EnqueueJobOptions
- */
-export type EnqueueJobOpts = EnqueueJobOptions;
+// const timestampToCronSchedule = (timestamp: number) => {
+//   const date = new Date(timestamp);
+
+//   return `${date.getMinutes()} ${date.getHours()} ${date.getDate()} ${date.getMonth()} *`;
+// };
+
+// type EnqueueJobOptionssSchemaMatchesDocs = AssertTrue<
+//   IsExact<EnqueueJobOptions, EnqueueJobOptionsSchema>
+// >;
 
 export interface EnqueueJobOptions {
   /**
@@ -127,7 +150,7 @@ export interface EnqueueJobOptions {
    * If there's already a job with the same ID, this job will be trashed.
    * @tutorial https://demo.quirrel.dev/managed
    */
-  id?: string;
+  id?: JobId;
 
   /**
    * If set to `true`,
@@ -222,14 +245,18 @@ function getAuthHeaders(
   return { Authorization: `Bearer ${token}` };
 }
 
+let globalPrisma: PrismaClient | undefined;
+
 export class QuirrelClient<T> {
   private handler;
   private route;
   private defaultJobOptions;
   private encryptor;
   private defaultHeaders: Record<string, string>;
-  private quirrelBaseUrl;
-  private baseUrl;
+  // private quirrelBaseUrl;
+  private applicationBaseUrl;
+  private databaseUrl;
+  // private baseUrl;
   private token;
   private fetch;
   private catchDecryptionErrors;
@@ -238,42 +265,112 @@ export class QuirrelClient<T> {
     this.handler = args.handler;
     this.defaultJobOptions = args.defaultJobOptions;
 
+    this.databaseUrl = args.config?.databaseUrl ?? config.getDatabaseUrl();
+
     const token = args.config?.token ?? config.getQuirrelToken();
     this.defaultHeaders = {
       ...getAuthHeaders(token),
       "X-QuirrelClient-Version": pack.version,
     };
 
-    const quirrelBaseUrl =
-      args.config?.quirrelBaseUrl ?? config.getQuirrelBaseUrl();
-    const applicationBaseUrl = config.prefixWithProtocol(
+    // const quirrelBaseUrl =
+    //   args.config?.quirrelBaseUrl ?? config.getQuirrelBaseUrl();
+    let applicationBaseUrl = config.prefixWithProtocol(
       args.config?.applicationBaseUrl ?? config.getApplicationBaseUrl()!
     );
-    this.quirrelBaseUrl = quirrelBaseUrl;
-    this.baseUrl =
-      quirrelBaseUrl +
-      "/queues/" +
-      encodeURIComponent(applicationBaseUrl + "/" + args.route);
-    this.token = args.config?.token ?? config.getQuirrelToken();
+
+    applicationBaseUrl = applicationBaseUrl.replace(
+      "//localhost:",
+      "//host.docker.internal:"
+    );
+
+    this.applicationBaseUrl = applicationBaseUrl;
+    // this.quirrelBaseUrl = quirrelBaseUrl;
     this.route = args.route;
+    // this.baseUrl =
+    //   quirrelBaseUrl +
+    //   "/queues/" +
+    //   encodeURIComponent(applicationBaseUrl + "/" + this.route);
+
+    this.token = args.config?.token ?? config.getQuirrelToken();
     this.encryptor = getEncryptor(
       args.config?.encryptionSecret ?? config.getEncryptionSecret(),
       args.config?.oldSecrets ?? config.getOldEncryptionSecrets() ?? undefined
     );
     this.catchDecryptionErrors = args.catchDecryptionErrors;
+
     this.fetch = args.fetch ?? fetch;
   }
 
-  async makeRequest(uri: string, init?: RequestInit) {
-    return await this.fetch(this.quirrelBaseUrl + uri, {
-      credentials: "omit",
-      ...init,
-      headers: {
-        ...this.defaultHeaders,
-        ...init?.headers,
+  private get prisma() {
+    if (!this.databaseUrl)
+      throw new Error("Missing required QUIRREL_DATABASE_URL");
+
+    // only instantiate it once
+    globalPrisma ||= new PrismaClient({
+      datasources: {
+        db: {
+          url: this.databaseUrl,
+        },
       },
     });
+
+    return globalPrisma;
   }
+
+  beforeExit(cb: () => Promise<void>) {
+    this.prisma.$on("beforeExit", async () => {
+      await cb();
+      // process.exit();
+    });
+  }
+
+  async getAllCronJobs() {
+    const dbJobs = await this.prisma.job.findMany();
+
+    // const endpointsResponse = await this.makeRequest("/queues/");
+    // const endpointsResult = z
+    //   .array(z.string())
+    //   .safeParse(await endpointsResponse.json());
+    // const endpoints = endpointsResult.success ? endpointsResult.data : [];
+
+    // const jobs: JobDTO[] = [];
+
+    // await Promise.all(
+    //   endpoints.map(async (endpoint) => {
+    //     const jobRes = await this.makeRequest(
+    //       `/queues/${encodeURIComponent(endpoint)}/${encodeURIComponent("@cron")}`
+    //     );
+
+    //     if (jobRes.status !== 200) {
+    //       return;
+    //     }
+
+    //     jobs.push(await jobRes.json());
+    //   })
+    // );
+
+    return dbJobs.map((j) => this.dbJobToJob(j));
+  }
+
+  // TODO
+  async getQueuedEndpoints() {
+    return [];
+    // const jobs = await this.getAllCronJobs();
+
+    // return jobs.map((j) => j.endpoint);
+  }
+
+  // async makeRequest(uri: string, init?: RequestInit) {
+  //   return await this.fetch(this.quirrelBaseUrl + uri, {
+  //     credentials: "omit",
+  //     ...init,
+  //     headers: {
+  //       ...this.defaultHeaders,
+  //       ...init?.headers,
+  //     },
+  //   });
+  // }
 
   private async payloadAndOptionsToBody(
     payload: T,
@@ -312,7 +409,7 @@ export class QuirrelClient<T> {
       id: options.id,
       repeat: options.repeat,
       retry: options.retry?.map(parseDuration),
-      override: options.override
+      override: options.override,
     };
   }
 
@@ -323,21 +420,74 @@ export class QuirrelClient<T> {
   async enqueue(payload: T, options: EnqueueJobOptions = {}): Promise<Job<T>> {
     const body = await this.payloadAndOptionsToBody(payload, options);
 
-    const res = await this.fetch(this.baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...this.defaultHeaders,
-      },
-      credentials: "omit",
-      body: JSON.stringify(body),
-    });
+    const endpoint = this.applicationBaseUrl + "/" + this.route;
 
-    if (res.status === 201) {
-      return await this.toJob(await res.json());
+    let jobId: JobId;
+
+    const headers = {
+      "x-quirrel-secret": "TODO-secret",
+    };
+
+    const cronSchedule = body.repeat?.cron;
+    if (cronSchedule) {
+      const jobName = `cron-job:${this.route}`.substring(0, 64);
+
+      await this.deleteExisting(jobName);
+
+      [{ schedule: jobId }] = await this.prisma.$queryRaw`
+        select
+        cron.schedule(
+          ${jobName},
+          ${cronSchedule}, 
+          ${`
+          select status
+          from
+            ${httpRequestSQL(endpoint, "POST", {}, headers)}
+          `}
+        );
+      `;
+    } else {
+      throw new Error("UNIMPLEMENTED: 'schedule' is required");
+
+      // const jobName = `delay-job:${body.id ?? this.route}`.substring(0, 64);
+
+      // const runAt = Date.now() + Math.min(120000, body.delay || 0);
+
+      // const in1Year = new Date();
+      // in1Year.setFullYear(in1Year.getFullYear() + 1);
+      // if (runAt > in1Year.getTime() - 120000)
+      //   throw new Error("Cannot schedule more than 1 year in advance!");
+
+      // [{ schedule: jobId }] = await this.prisma.$queryRaw`
+      //   select
+      //   cron.schedule(
+      //     ${jobName},
+      //     ${timestampToCronSchedule(runAt)},
+      //     ${`
+      //     select status from (
+      //       select schedule from cron.unschedule('${jobName}')
+      //     ), (
+      //       select status from ${httpRequestSQL(
+      //         endpoint,
+      //         "POST",
+      //         payload,
+      //         headers
+      //       )}
+      //     )
+      //     `}
+      //   );
+      // `;
     }
 
-    throw new Error(`Unexpected response: ${await res.text()}`);
+    const job = await this.getById(jobId);
+
+    if (!job) throw new Error(`Job ${jobId} not found`);
+
+    console.log(
+      `enqueued job ${job.id}: "${job.repeat?.cron}" at "${job.endpoint}"`
+    );
+
+    return job;
   }
 
   /**
@@ -346,31 +496,37 @@ export class QuirrelClient<T> {
   async enqueueMany(
     jobs: { payload: T; options?: EnqueueJobOptions }[]
   ): Promise<Job<T>[]> {
-    const body = await Promise.all(
-      jobs.map(({ payload, options = {} }) =>
-        this.payloadAndOptionsToBody(payload, options)
-      )
-    );
+    throw new Error("UNIMPLEMENTED");
+    // const body = await Promise.all(
+    //   jobs.map(({ payload, options = {} }) =>
+    //     this.payloadAndOptionsToBody(payload, options)
+    //   )
+    // );
 
-    const res = await this.fetch(this.baseUrl + "/batch", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...this.defaultHeaders,
-      },
-      credentials: "omit",
-      body: JSON.stringify(body),
-    });
+    // const res = await this.fetch(this.baseUrl + "/batch", {
+    //   method: "POST",
+    //   headers: {
+    //     "Content-Type": "application/json",
+    //     ...this.defaultHeaders,
+    //   },
+    //   credentials: "omit",
+    //   body: JSON.stringify(body),
+    // });
 
-    if (res.status === 201) {
-      const response = (await res.json()) as any[];
-      return await Promise.all(response.map((job) => this.toJob(job)));
-    }
+    // if (res.status === 201) {
+    //   const response = (await res.json()) as any[];
+    //   return await Promise.all(response.map((job) => this.toJob(job)));
+    // }
 
-    throw new Error(`Unexpected response: ${await res.text()}`);
+    // throw new Error(`Unexpected response: ${await res.text()}`);
   }
 
-  private async decryptAndDecodeBody(body: string): Promise<T> {
+  private async decryptAndDecodeBody(body: any): Promise<T> {
+    if (body == null || body === "") return {} as T;
+    if (typeof body === "object") return body;
+    if (typeof body !== "string")
+      throw new Error(`Invalid encoded body type: ${typeof body}`);
+
     if (this.encryptor) {
       if (this.catchDecryptionErrors) {
         try {
@@ -391,100 +547,152 @@ export class QuirrelClient<T> {
     return {
       ...dto,
       body: await this.decryptAndDecodeBody(dto.body),
-      runAt: new Date(dto.runAt),
+      runAt: dto.runAt ? new Date(dto.runAt) : undefined,
       delete: () => this.delete(dto.id),
       invoke: () => this.invoke(dto.id),
     };
   }
 
   /**
-   * Iterate through scheduled jobs.
+   * Iterate through scheduled jobs for `this.route`.
    * @example
    * for await (const jobs of queue.get()) {
    *   // do smth
    * }
    */
   async *get(): AsyncGenerator<Job<T>[]> {
-    let cursor: number | null = 0;
+    const dbJobs = await this.prisma.job.findMany({
+      where: {
+        jobname: `cron-job:${this.route}`.substring(0, 64),
+      },
+    });
 
-    while (cursor !== null) {
-      const res = await this.fetch(this.baseUrl + "?cursor=" + cursor, {
-        headers: this.defaultHeaders,
-      });
+    yield await Promise.all(dbJobs.map((j) => this.toJob(this.dbJobToJob(j))));
 
-      const json = await res.json();
+    // let cursor: number | null = 0;
+    // while (cursor !== null) {
+    //   const res = await this.fetch(this.baseUrl + "?cursor=" + cursor, {
+    //     headers: this.defaultHeaders,
+    //   });
+    //   const json = await res.json();
+    //   const { cursor: newCursor, jobs } = json as {
+    //     cursor: number | null;
+    //     jobs: JobDTO[];
+    //   };
+    //   cursor = newCursor;
+    //   yield await Promise.all(jobs.map((dto) => this.toJob(dto)));
+    // }
+  }
 
-      const { cursor: newCursor, jobs } = json as {
-        cursor: number | null;
-        jobs: JobDTO[];
-      };
+  private dbJobToJob(dbJob: DbJob): JobDTO {
+    const endpoint = dbJob.command.match(/'(https?:\/\/.*?)'/)?.[1];
+    if (!endpoint) throw new Error("Failed to parse job endpoint!");
 
-      cursor = newCursor;
-
-      yield await Promise.all(jobs.map((dto) => this.toJob(dto)));
-    }
+    return {
+      id: Number(dbJob.jobid),
+      body: "",
+      endpoint,
+      repeat: {
+        cron: dbJob.schedule,
+      },
+    };
   }
 
   /**
    * Get a specific job.
    * @returns null if no job was found.
    */
-  async getById(id: string): Promise<Job<T> | null> {
-    const res = await this.fetch(this.baseUrl + "/" + id, {
-      headers: this.defaultHeaders,
+  async getById(id: JobId): Promise<Job<T> | null> {
+    const dbJob = await this.prisma.job.findFirst({
+      where: {
+        jobid: Number(id),
+      },
     });
 
-    if (res.status === 404) {
-      return null;
-    }
+    if (!dbJob) return null;
 
-    if (res.status === 200) {
-      return await this.toJob(await res.json());
-    }
-
-    throw new Error("Unexpected response: " + (await res.text()));
+    return await this.toJob(this.dbJobToJob(dbJob));
   }
 
   /**
    * Schedule a job for immediate execution.
    * @returns false if job could not be found.
    */
-  async invoke(id: string): Promise<boolean> {
-    const res = await this.fetch(this.baseUrl + "/" + id, {
-      method: "POST",
-      headers: this.defaultHeaders,
-    });
+  async invoke(id: JobId): Promise<boolean> {
+    throw new Error("UNIMPLEMENTED");
 
-    if (res.status === 404) {
-      return false;
-    }
+    // const res = await this.fetch(this.baseUrl + "/" + id, {
+    //   method: "POST",
+    //   headers: this.defaultHeaders,
+    // });
 
-    if (res.status === 204) {
-      return true;
-    }
+    // if (res.status === 404) {
+    //   return false;
+    // }
 
-    throw new Error("Unexpected response: " + (await res.text()));
+    // if (res.status === 204) {
+    //   return true;
+    // }
+
+    // throw new Error("Unexpected response: " + (await res.text()));
   }
 
   /**
    * Delete a job, preventing it from executing.
    * @returns false if job could not be found.
    */
-  async delete(id: string): Promise<boolean> {
-    const res = await this.fetch(this.baseUrl + "/" + id, {
-      method: "DELETE",
-      headers: this.defaultHeaders,
+  async delete(id: JobId): Promise<boolean> {
+    if (id === "@cron") {
+      const count = await this.deleteExisting(
+        `cron-job:${this.route}`.substring(0, 64)
+      );
+
+      return count > 0;
+    } else if (typeof id === "number") {
+      const { count } = await this.prisma.job.deleteMany({
+        where: {
+          jobid: Number(id),
+        },
+      });
+
+      return count > 0;
+    } else {
+      throw new Error(`Invalid job id for delete: ${id}`);
+    }
+
+    // const res = await this.fetch(this.baseUrl + "/" + id, {
+    //   method: "DELETE",
+    //   headers: this.defaultHeaders,
+    // });
+
+    // if (res.status === 404) {
+    //   return false;
+    // }
+
+    // if (res.status === 204) {
+    //   return true;
+    // }
+
+    // throw new Error("Unexpected response: " + (await res.text()));
+  }
+
+  private async deleteExisting(jobName: string) {
+    const { count } = await this.prisma.job.deleteMany({
+      where: {
+        jobname: jobName,
+      },
     });
 
-    if (res.status === 404) {
-      return false;
-    }
+    if (count > 0)
+      console.log(`Deleted ${count} existing job(s) for ${jobName}`);
 
-    if (res.status === 204) {
-      return true;
-    }
+    return count;
+  }
 
-    throw new Error("Unexpected response: " + (await res.text()));
+  async deleteAll() {
+    const { count } = await this.prisma.job.deleteMany();
+
+    if (count > 0) console.log(`Deleted ${count} job(s) during cleanup`);
   }
 
   async respondTo(
@@ -493,7 +701,7 @@ export class QuirrelClient<T> {
   ): Promise<{
     status: number;
     headers: Record<string, string>;
-    body: string;
+    body: any;
   }> {
     if (process.env.NODE_ENV === "production") {
       const signature = headers["x-quirrel-signature"];
@@ -516,6 +724,7 @@ export class QuirrelClient<T> {
     }
 
     const payload = await this.decryptAndDecodeBody(body);
+
     const { id, count, retry, nextRepetition, exclusive } = JSON.parse(
       (headers["x-quirrel-meta"] as string) ?? "{}"
     );
@@ -546,3 +755,8 @@ export class QuirrelClient<T> {
     }
   }
 }
+
+export type QuirrelPublishClient<T> = Pick<
+  QuirrelClient<T>,
+  "enqueue" | "enqueueMany" | "delete" | "get" | "getById" | "invoke"
+>;

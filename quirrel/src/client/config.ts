@@ -35,6 +35,10 @@ export function getQuirrelBaseUrl(): string | undefined {
   return isProduction() ? "https://api.quirrel.dev" : "http://localhost:9181";
 }
 
+export function getDatabaseUrl(): string | undefined {
+  return process.env.QUIRREL_DATABASE_URL;
+}
+
 export function getQuirrelToken(): string | undefined {
   return process.env.QUIRREL_TOKEN;
 }

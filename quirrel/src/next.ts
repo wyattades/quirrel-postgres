@@ -1,10 +1,10 @@
 import {
   QuirrelClient,
-  EnqueueJobOpts,
   EnqueueJobOptions,
   Job,
   DefaultJobOptions,
   QuirrelJobHandler,
+  QuirrelPublishClient,
 } from "./client";
 import { registerDevelopmentDefaults } from "./client/config";
 import type { IncomingHttpHeaders } from "http";
@@ -20,21 +20,13 @@ interface NextApiResponse {
   send(body: string): void;
 }
 
-export {
-  Job,
-  EnqueueJobOpts,
-  EnqueueJobOptions,
-  DefaultJobOptions,
-  QuirrelJobHandler,
-};
+export { Job, EnqueueJobOptions, DefaultJobOptions, QuirrelJobHandler };
 
 registerDevelopmentDefaults({
   applicationBaseUrl: "http://localhost:3000",
 });
 
-export type Queue<Payload> = Omit<
-  QuirrelClient<Payload>,
-  "respondTo" | "makeRequest"
+export type Queue<Payload> = QuirrelPublishClient<Payload>
 >;
 
 export function Queue<Payload>(
@@ -82,3 +74,9 @@ export function CronJob(
 ) {
   return Queue(route, handler) as unknown;
 }
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};

@@ -8,8 +8,10 @@ function isUrl(s: string) {
   return urlRegex.test(s);
 }
 
+const LOCALHOST_PORT = 5432;
+
 function formatBaseUrl(url: string) {
-  if (url === "http://localhost:9181") {
+  if (url.startsWith(`http://localhost:${LOCALHOST_PORT}`)) {
     return "localhost";
   }
 
@@ -92,7 +94,9 @@ export function EndpointModal() {
               <div className="mt-2 space-y-2">
                 <span className="space-x-2 text-blue-400 text-xs">
                   <button
-                    onClick={() => setEndpoint("http://localhost:9181")}
+                    onClick={() =>
+                      setEndpoint(`http://localhost:${LOCALHOST_PORT}`)
+                    }
                     className="inline-flex items-center hover:text-blue-300 focus:outline-none"
                   >
                     <svg
@@ -112,7 +116,7 @@ export function EndpointModal() {
                     localhost
                   </button>
                   <button
-                    onClick={() => setEndpoint("https://api.quirrel.dev")}
+                    onClick={() => setEndpoint("https://na.na.na.na.na")}
                     className="inline-flex items-center hover:text-blue-300 focus:outline-none"
                   >
                     <svg
